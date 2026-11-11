@@ -1,28 +1,32 @@
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const { createClient } = require('@supabase/supabase-js');
 const app = express();
 
-// Permite apenas o seu site (troque pelo domínio real se for usar domínio próprio)
-app.use(cors()); 
+// 🛡️ PROTEÇÃO: Conserta o IP no Render
+app.set('trust proxy', 1);
+
+// 🛡️ PROTEÇÃO: CORS restrito ao seu site no Netlify
+app.use(cors({ origin: 'https://smalblackprices.netlify.app' }));
 app.use(express.json());
 
-// 🛡️ PROTEÇÃO: Limita a 40 requisições por minuto por IP
+// 🛡️ PROTEÇÃO: Rate Limit por IP real
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000, 
-  max: 40, 
-  message: { error: 'Muitas requisições. Tente novamente em 1 minuto.' }
+  max: 60, 
+  message: { error: 'Muitas requisições. Aguarde 1 minuto.' }
 });
 app.use('/api/', limiter);
 
 const REEF_API_KEY = process.env.REEF_API_KEY;
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ==========================================
-// 🧠 HELPERS E CACHE INTELIGENTE
+// 🧠 HELPERS E CACHE
 // ==========================================
 const cache = new Map();
-const pendingCache = new Map(); // Para evitar picos de requisições simultâneas
-const alertsDB = []; // Banco de dados temporário (memória)
+const pendingCache = new Map();
 
 function getCache(key) {
   const c = cache.get(key);
@@ -32,19 +36,17 @@ function getCache(key) {
 }
 
 function setCache(key, data, ms) {
-  if (cache.size > 5000) cache.delete(cache.keys().next().value); // Evita vazar memória
+  if (cache.size > 5000) cache.delete(cache.keys().next().value);
   cache.set(key, { data, expiry: Date.now() + ms });
 }
 
-// Converte preços no formato "1.299,00" para 1299.00
+// CORREÇÃO: Preço não multiplica mais por 100
 function parsePrice(val) {
   if (typeof val === 'number') return val;
-  if (!val) return 0;
-  const cleanStr = String(val).replace(/\./g, '').replace(',', '.');
-  return parseFloat(cleanStr) || 0;
+  const s = String(val || '').replace(/[^\d.,]/g, '');
+  return parseFloat(s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s) || 0;
 }
 
-// Mapeia o produto da Amazon para o formato do site
 function mapAmazonItem(item) {
   if (!item.price) return null;
   const price = parsePrice(item.price);
@@ -65,6 +67,40 @@ function mapAmazonItem(item) {
   };
 }
 
+// Salva os preços no Supabase (Histórico Real)
+async function savePrices(results) {
+  if (!supabase) {
+    console.log("❌ ERRO: Supabase não configurado (URL ou KEY faltando no Render).");
+    return;
+  }
+  if (!results || results.length === 0) return;
+  
+  try {
+    // Adiciona a data de hoje explicitamente para o Supabase não rejeitar
+    const today = new Date().toISOString().split('T')[0];
+    const upserts = results.map(p => ({ 
+      product_id: p.id, 
+      day: today, 
+      price: p.price 
+    }));
+
+    console.log(`⏳ Tentando salvar ${upserts.length} produtos no Supabase...`);
+    
+    const { data, error } = await supabase.from('prices').upsert(
+      upserts, 
+      { onConflict: 'product_id,day', ignoreDuplicates: true }
+    );
+    
+    if (error) {
+      console.error("❌ ERRO DO SUPABASE AO SALVAR:", error.message, error.details);
+    } else {
+      console.log(`✅ ${upserts.length} preços salvos/verificados com sucesso!`);
+    }
+  } catch (e) { 
+    console.error("❌ ERRO FATAL AO CONECTAR COM SUPABASE:", e.message); 
+  }
+}
+
 async function reefRequest(engine, action, body) {
   const url = `https://api.reefapi.com/${engine}/v1/${action}`;
   const response = await fetch(url, {
@@ -82,47 +118,33 @@ async function reefRequest(engine, action, body) {
 
 app.post('/api/suggest', async (req, res) => {
   const { query } = req.body;
-  // 🛡️ PROTEÇÃO: Valida se é string para não derrubar o servidor
-  if (typeof query !== 'string' || !query.trim() || query.length > 100) {
-    return res.status(400).json({ error: 'Termo inválido' });
-  }
+  if (typeof query !== 'string' || !query.trim() || query.length > 100) return res.status(400).json({ error: 'Inválido' });
 
-  const cacheKey = `sug:${query.toLowerCase()}`;
+  const cacheKey = `sug:${query.trim().toLowerCase()}`;
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
 
   try {
-    // 💰 ECONOMIA: Busca apenas na Amazon (1 chamada em vez de 2)
     const amazonData = await reefRequest('amazon', 'search', { query, marketplace: 'com.br', max_results: 3 }).catch(() => null);
-    
     let titles = [];
-    if (amazonData?.data?.results) {
-      titles.push(...amazonData.data.results.map(i => i.title));
-    }
+    if (amazonData?.data?.results) titles.push(...amazonData.data.results.map(i => i.title));
     
     const uniqueTitles = [...new Set(titles)].filter(Boolean).slice(0, 5);
     const responseData = { suggestions: uniqueTitles };
     
-    if (uniqueTitles.length > 0) setCache(cacheKey, responseData, 1000 * 60 * 60); // 1 hora
+    if (uniqueTitles.length > 0) setCache(cacheKey, responseData, 1000 * 60 * 60);
     res.json(responseData);
-  } catch (error) {
-    res.json({ suggestions: [] });
-  }
+  } catch (error) { res.json({ suggestions: [] }); }
 });
 
 app.post('/api/trending', async (req, res) => {
-  const cacheKey = 'trending_v2';
+  const cacheKey = 'trending_v3';
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
 
-  // 🛡️ PROTEÇÃO DE PICO: Se já tem alguém buscando, espera a mesma promessa
   if (pendingCache.has(cacheKey)) {
-    try {
-      const result = await pendingCache.get(cacheKey);
-      return res.json(result);
-    } catch (e) {
-      return res.status(502).json({ error: 'Falha ao carregar' });
-    }
+    try { return res.json(await pendingCache.get(cacheKey)); } 
+    catch (e) { return res.status(502).json({ error: 'Falha' }); }
   }
 
   const fetchPromise = (async () => {
@@ -141,7 +163,10 @@ app.post('/api/trending', async (req, res) => {
     });
 
     const uniqueResults = Array.from(new Map(allResults.map(item => [item.id, item])).values());
-    if (uniqueResults.length === 0) throw new Error("Nenhum produto encontrado nas APIs.");
+    if (uniqueResults.length === 0) throw new Error("Sem resultados");
+
+    // SALVA NO SUPABASE
+    await savePrices(uniqueResults);
 
     return { results: uniqueResults.sort(() => Math.random() - 0.5) };
   })();
@@ -150,7 +175,7 @@ app.post('/api/trending', async (req, res) => {
 
   try {
     const responseData = await fetchPromise;
-    setCache(cacheKey, responseData, 1000 * 60 * 10); // 10 mins
+    setCache(cacheKey, responseData, 1000 * 60 * 10);
     pendingCache.delete(cacheKey);
     res.json(responseData);
   } catch (error) {
@@ -161,53 +186,31 @@ app.post('/api/trending', async (req, res) => {
 
 app.post('/api/search', async (req, res) => {
   const { query } = req.body;
-  if (typeof query !== 'string' || !query.trim() || query.length > 100) {
-    return res.status(400).json({ error: 'Termo inválido' });
-  }
+  if (typeof query !== 'string' || !query.trim() || query.length > 100) return res.status(400).json({ error: 'Inválido' });
 
-  const cacheKey = `search:${query.toLowerCase()}`;
+  const cacheKey = `search:${query.trim().toLowerCase()}`;
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
 
   try {
-    const [amazonResult, meliResult] = await Promise.allSettled([
-      reefRequest('amazon', 'search', { query, marketplace: 'com.br', max_results: 10 }),
-      reefRequest('mercadolibre', 'search', { query, site_id: 'MLB', limit: 10 })
-    ]);
+    const amazonResult = await reefRequest('amazon', 'search', { query, marketplace: 'com.br', max_results: 12 }).catch(() => null);
 
     const results = [];
 
-    if (amazonResult.status === 'fulfilled' && amazonResult.value.data?.results) {
-      amazonResult.value.data.results.forEach(item => {
+    if (amazonResult?.data?.results) {
+      amazonResult.data.results.forEach(item => {
         const mapped = mapAmazonItem(item);
         if (mapped) results.push(mapped);
       });
     }
 
-    if (meliResult.status === 'fulfilled') {
-      const meliItems = meliResult.value.results || meliResult.value.data?.results || meliResult.value.data?.items || [];
-      meliItems.forEach(item => {
-        const priceNum = parsePrice(item.price);
-        if (priceNum > 0) {
-          results.push({ 
-            id: item.id, 
-            title: item.title, 
-            price: priceNum, 
-            originalPrice: parsePrice(item.original_price || item.old_price) || null,
-            url: item.permalink || item.url || `https://produto.mercadolivre.com.br/${item.id}`, 
-            image: item.thumbnail || item.image || null, 
-            store: 'Mercado Livre', 
-            storeLogo: '🟡', 
-            rating: item.rating || null 
-          });
-        }
-      });
-    }
-
     if (results.length === 0) throw new Error("Nenhum produto encontrado.");
 
+    // SALVA NO SUPABASE
+    await savePrices(results);
+
     const responseData = { results };
-    setCache(cacheKey, responseData, 1000 * 60 * 10); // 10 mins
+    setCache(cacheKey, responseData, 1000 * 60 * 10);
     res.json(responseData);
   } catch (error) {
     res.status(502).json({ error: error.message });
@@ -215,32 +218,28 @@ app.post('/api/search', async (req, res) => {
 });
 
 app.post('/api/history', async (req, res) => {
-  const { product_id, period = '12m' } = req.body;
-  if (!product_id) return res.status(400).json({ error: 'product_id obrigatório' });
+  const { product_id } = req.body;
+  if (typeof product_id !== 'string') return res.status(400).json({ error: 'id inválido' });
 
-  const cacheKey = `hist:${product_id}:${period}`;
-  const cached = getCache(cacheKey);
-  if (cached) return res.json(cached);
+  if (!supabase) return res.status(500).json({ error: 'Banco de dados não configurado' });
 
   try {
-    const data = await reefRequest('zoom-buscape', 'price_history', { product_id, period });
-    setCache(cacheKey, data, 1000 * 60 * 60); // 1 hora de cache
-    res.json(data);
-  } catch (error) { 
-    // Não salva erro no cache
-    res.status(500).json({ error: error.message }); 
+    const { data, error } = await supabase.from('prices').select('day, price').eq('product_id', product_id).order('day');
+    if (error) throw error;
+    if (!data || data.length < 2) return res.status(404).json({ error: 'Pouco histórico' });
+    
+    const vals = data.map(r => +r.price).sort((a,b) => a-b);
+    res.json({ data: {
+      points: data.map(r => ({ date: r.day, price: +r.price })),
+      min: vals[0], max: vals[vals.length-1], median: vals[Math.floor(vals.length/2)]
+    }});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/alert', (req, res) => {
-  const { product_id, target_price, contact } = req.body;
-  if(!product_id || !target_price || !contact) return res.status(400).json({error: 'Dados inválidos'});
-  
-  // Salva na memória (Para produção, troque por um banco de dados real)
-  alertsDB.push({ product_id, target_price, contact, date: new Date() });
-  
-  console.log(`[ALERTA] Alerta cadastrado. Total: ${alertsDB.length}`);
-  res.json({ success: true, message: 'Alerta salvo!' });
+  res.status(503).json({ error: 'Recurso em manutenção' });
 });
 
 const PORT = process.env.PORT || 3000;
