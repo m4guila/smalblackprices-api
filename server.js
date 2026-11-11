@@ -7,11 +7,8 @@ app.use(express.json());
 
 const REEF_API_KEY = process.env.REEF_API_KEY;
 
-// ==========================================
-// 📌 CACHE GLOBAL
-// ==========================================
-const CACHE_DURATION = 1000 * 60 * 10; // 10 mins para buscas normais
-const SUGGEST_CACHE_DURATION = 1000 * 60 * 60; // 1 hora para autocomplete
+const CACHE_DURATION = 1000 * 60 * 10; 
+const SUGGEST_CACHE_DURATION = 1000 * 60 * 60; 
 const cache = new Map();
 
 const affiliateLinks = {
@@ -32,20 +29,14 @@ async function reefRequest(engine, action, body) {
   return response.json();
 }
 
-// ==========================================
-// 📌 ROTA DE AUTOCOMPLETE (RÁPIDA)
-// ==========================================
 app.post('/api/suggest', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.json({ suggestions: [] });
 
   const cacheKey = `sug:${query.toLowerCase()}`;
-  if (cache.has(cacheKey)) {
-    return res.json(cache.get(cacheKey).data);
-  }
+  if (cache.has(cacheKey)) return res.json(cache.get(cacheKey).data);
 
   try {
-    // Busca apenas 3 itens em cada loja para ser ultra rápido
     const [amazonData, meliData] = await Promise.all([
       reefRequest('amazon', 'search', { query, marketplace: 'com.br', max_results: 3 }).catch(() => null),
       reefRequest('mercadolibre', 'search', { query, site_id: 'MLB', limit: 3 }).catch(() => null)
@@ -55,11 +46,9 @@ app.post('/api/suggest', async (req, res) => {
     if (amazonData?.data?.results) titles.push(...amazonData.data.results.map(i => i.title));
     if (meliData?.data?.results) titles.push(...meliData.data.results.map(i => i.title));
 
-    // Remove duplicados e pega os 5 primeiros
     const uniqueTitles = [...new Set(titles)].slice(0, 5);
     const responseData = { suggestions: uniqueTitles };
 
-    // Salva no cache
     cache.set(cacheKey, { data: responseData, expiry: Date.now() + SUGGEST_CACHE_DURATION });
     res.json(responseData);
   } catch (error) {
@@ -67,9 +56,6 @@ app.post('/api/suggest', async (req, res) => {
   }
 });
 
-// ==========================================
-// 📌 ROTA DE BUSCA NORMAL
-// ==========================================
 app.post('/api/search', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: 'Termo obrigatório' });
@@ -88,18 +74,45 @@ app.post('/api/search', async (req, res) => {
     ]);
 
     const results = [];
+    
+    // AMAZON: Tenta pegar a URL, se não existir, constrói com o ASIN
     if (amazonData.data && amazonData.data.results) {
       amazonData.data.results.forEach(item => {
         if (item.price && item.price > 0) {
-          results.push({ id: item.asin, title: item.title, price: item.price, url: item.url, image: item.image, store: 'Amazon', storeLogo: '🅰️', rating: item.rating || null });
+          // Procura a URL em vários campos possíveis. Se não achar, monta o link da Amazon.
+          const amzUrl = item.url || item.link || item.product_url || (item.asin ? `https://www.amazon.com.br/dp/${item.asin}` : null);
+          
+          results.push({ 
+            id: item.asin, 
+            title: item.title, 
+            price: item.price, 
+            url: amzUrl, 
+            image: item.image, 
+            store: 'Amazon', 
+            storeLogo: '🅰️', 
+            rating: item.rating || null 
+          });
         }
       });
     }
 
+    // MERCADO LIVRE: Tenta pegar a URL, se não existir, constrói com o ID
     if (meliData.data && meliData.data.results) {
       meliData.data.results.forEach(item => {
         if (item.price && item.price > 0) {
-          results.push({ id: item.id, title: item.title, price: item.price, url: affiliateLinks[item.id] || item.permalink, image: item.thumbnail, store: 'Mercado Livre', storeLogo: '🟡', rating: item.rating || null });
+          // Procura a URL em vários campos possíveis. Se não achar, monta o link do Mercado Livre.
+          const meliUrl = affiliateLinks[item.id] || item.permalink || item.url || item.link || (item.id ? `https://produto.mercadolivre.com.br/${item.id}` : null);
+          
+          results.push({ 
+            id: item.id, 
+            title: item.title, 
+            price: item.price, 
+            url: meliUrl, 
+            image: item.thumbnail, 
+            store: 'Mercado Livre', 
+            storeLogo: '🟡', 
+            rating: item.rating || null 
+          });
         }
       });
     }
@@ -113,7 +126,6 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
-// Rotas de histórico e alerta continuam iguais...
 app.post('/api/history', async (req, res) => {
   const { product_id, period = '12m' } = req.body;
   if (!product_id) return res.status(400).json({ error: 'product_id obrigatório' });
