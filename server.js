@@ -56,21 +56,27 @@ app.post('/api/search', async (req, res) => {
 
     const results = [];
 
+    // Amazon (Filtrando preços válidos)
     if (amazonData.data && amazonData.data.results) {
       amazonData.data.results.forEach(item => {
-        results.push({
-          id: item.asin, title: item.title, price: item.price, url: item.url, image: item.image, store: 'Amazon', storeLogo: '🅰️',
-          rating: item.rating || null 
-        });
+        if (item.price && item.price > 0) {
+          results.push({
+            id: item.asin, title: item.title, price: item.price, url: item.url, image: item.image, store: 'Amazon', storeLogo: '🅰️',
+            rating: item.rating || null 
+          });
+        }
       });
     }
 
+    // Mercado Livre (Filtrando preços válidos)
     if (meliData.data && meliData.data.results) {
       meliData.data.results.forEach(item => {
-        results.push({
-          id: item.id, title: item.title, price: item.price, url: affiliateLinks[item.id] || item.permalink, image: item.thumbnail, store: 'Mercado Livre', storeLogo: '🟡',
-          rating: item.rating || null
-        });
+        if (item.price && item.price > 0) {
+          results.push({
+            id: item.id, title: item.title, price: item.price, url: affiliateLinks[item.id] || item.permalink, image: item.thumbnail, store: 'Mercado Livre', storeLogo: '🟡',
+            rating: item.rating || null
+          });
+        }
       });
     }
 
@@ -94,16 +100,9 @@ app.post('/api/history', async (req, res) => {
   }
 });
 
-// ==========================================
-// 📌 ENDPOINT DE ALERTA DE PREÇO
-// ==========================================
 app.post('/api/alert', (req, res) => {
   const { product_id, target_price, email } = req.body;
-  if (!product_id || !target_price) {
-    return res.status(400).json({ error: 'Dados incompletos' });
-  }
-  // Em produção, você salvaria isso num banco de dados.
-  // Por enquanto, exibimos no console do Render.
+  if (!product_id || !target_price) return res.status(400).json({ error: 'Dados incompletos' });
   console.log(`[ALERTA] Produto: ${product_id} | Alvo: R$ ${target_price} | Contato: ${email || 'Não informado'}`);
   res.json({ success: true, message: 'Alerta salvo! Avisaremos quando o preço cair.' });
 });
