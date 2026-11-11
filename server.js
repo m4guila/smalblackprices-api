@@ -7,7 +7,17 @@ app.use(express.json());
 
 const REEF_API_KEY = process.env.REEF_API_KEY;
 
-// Função auxiliar para chamar qualquer endpoint da ReefAPI
+// 📌 MAPEAMENTO DE LINKS DE AFILIADOS
+// Aqui você coloca os IDs dos produtos e os seus links de afiliado correspondentes.
+const affiliateLinks = {
+  // Mercado Livre (TV TCL 50")
+  'XKEYBZ-D83T': 'https://meli.la/2ybEUuM',
+  'MLB67136040': 'https://meli.la/2ybEUuM', 
+  // Magazine Luiza (TV TCL 50")
+  'MAGALU_ID_DA_TV': 'https://magazineluiza.onelink.me/589508454/wo12r91d' 
+};
+
+// Função auxiliar para chamar a ReefAPI
 async function reefRequest(engine, action, body) {
   const url = `https://api.reefapi.com/${engine}/v1/${action}`;
   const response = await fetch(url, {
@@ -31,7 +41,7 @@ app.post('/api/search', async (req, res) => {
   if (!query) return res.status(400).json({ error: 'Termo obrigatório' });
 
   try {
-    // Executa buscas em paralelo na Amazon, Mercado Livre e Magalu
+    // Busca em paralelo na Amazon, Mercado Livre e Magalu
     const [amazonData, meliData, magaluData] = await Promise.all([
       reefRequest('amazon', 'search', { query, marketplace: 'com.br', max_results: 8 }),
       reefRequest('mercadolibre', 'search', { query, site_id: 'MLB', limit: 8 }),
@@ -40,14 +50,14 @@ app.post('/api/search', async (req, res) => {
 
     const results = [];
 
-    // Normaliza Amazon
+    // 1. Amazon
     if (amazonData.data && amazonData.data.results) {
       amazonData.data.results.forEach(item => {
         results.push({
           id: item.asin,
           title: item.title,
           price: item.price,
-          url: item.url,
+          url: item.url, // O frontend vai adicionar a tag da Amazon automaticamente
           image: item.image,
           store: 'Amazon',
           storeLogo: '🅰️'
@@ -55,14 +65,14 @@ app.post('/api/search', async (req, res) => {
       });
     }
 
-    // Normaliza Mercado Livre
+    // 2. Mercado Livre
     if (meliData.data && meliData.data.results) {
       meliData.data.results.forEach(item => {
         results.push({
           id: item.id,
           title: item.title,
           price: item.price,
-          url: item.permalink,
+          url: affiliateLinks[item.id] || item.permalink, // Troca para o link de afiliado se existir
           image: item.thumbnail,
           store: 'Mercado Livre',
           storeLogo: '🟡'
@@ -70,14 +80,14 @@ app.post('/api/search', async (req, res) => {
       });
     }
 
-    // Normaliza Magalu
+    // 3. Magazine Luiza
     if (magaluData.data && magaluData.data.results) {
       magaluData.data.results.forEach(item => {
         results.push({
           id: item.product_id,
           title: item.title,
           price: item.price,
-          url: item.url,
+          url: affiliateLinks[item.product_id] || affiliateLinks['MAGALU_ID_DA_TV'] || item.url, // Usa o link da loja como fallback
           image: item.image,
           store: 'Magazine Luiza',
           storeLogo: '🔵'
@@ -98,7 +108,6 @@ app.post('/api/history', async (req, res) => {
   if (!product_id) return res.status(400).json({ error: 'product_id obrigatório' });
 
   try {
-    // Usa o engine 'zoom-buscape' para histórico de preços
     const data = await reefRequest('zoom-buscape', 'price_history', {
       product_id,
       period
