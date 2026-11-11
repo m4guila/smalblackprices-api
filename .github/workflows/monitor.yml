@@ -1,0 +1,12 @@
+name: Monitorar Precos Diariamente
+on:
+  schedule:
+    - cron: '0 9 * * *' # Roda todo dia às 06:00 (Brasília)
+  workflow_dispatch: # Permite rodar manualmente também
+
+jobs:
+  ping-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chamar API do SmalBlackPrices
+        run: curl -X POST https://smalblackprices-api.onrender.com/api/trending
