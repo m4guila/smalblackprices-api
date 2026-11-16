@@ -1,0 +1,17 @@
+name: Atualizar produtos
+
+on:
+  schedule:
+    - cron: "0 11 * * *"   # 08:00 em Brasília
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Atualizar produtos
+        run: |
+          curl -sS -X POST https://smalblackprices-api.onrender.com/api/refresh \
+            -H "x-refresh-key: ${{ secrets.REFRESH_KEY }}" \
+            --max-time 300
