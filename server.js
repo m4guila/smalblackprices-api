@@ -7,28 +7,23 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(cors({ origin: 'https://smalblackprices.netlify.app' }));
 app.use(express.json());
-app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 60 }));
+app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 300 }));
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const MAX_AGE_DAYS = 6;
 
-// [categoria do site, termo buscado na Amazon] - 3 por dia, em rodízio
+// [categoria do site, termo buscado na Amazon] - 3 por dia, em rodízio de 3 dias
 const QUERIES = [
   ['trending', 'smart tv 4k'],
   ['trending', 'iphone'],
   ['trending', 'air fryer'],
-  ['eletrodomestico', 'eletrodomesticos'],
-  ['casa cozinha', 'utensilios de cozinha'],
   ['eletronico', 'fone bluetooth'],
   ['beleza', 'perfume'],
-  ['livro', 'livros mais vendidos'],
+  ['eletrodomestico', 'eletrodomesticos'],
+  ['casa cozinha', 'utensilios de cozinha'],
   ['video game', 'console video game'],
-  ['brinquedo', 'brinquedos'],
-  ['moda roupa', 'tenis'],
-  ['esporte', 'artigos esportivos'],
-  ['suplemento', 'whey protein'],
-  ['cupom', 'ofertas do dia']
+  ['brinquedo', 'brinquedos']
 ];
 const CATEGORY_KEYS = new Set(QUERIES.map(q => q[0]));
 
@@ -42,20 +37,21 @@ function parsePrice(val) {
   return parseFloat(s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s) || 0;
 }
 
-function pick(obj, ...paths) {
-  for (const path of paths) {
-    const v = path.split('.').reduce((a, k) => (a == null ? undefined : a[k]), obj);
-    if (v != null && v !== '') return v;
-  }
-  return undefined;
+const sinceDate = () => new Date(Date.now() - MAX_AGE_DAYS * 86400000).toISOString();
+// Data de hoje no horário de Brasília, ex.: "2026-11-16"
+const brDate = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
+// Busca palavra por palavra: "tv samsung" encontra "Samsung Smart TV"
+function matchWords(query, q) {
+  for (const w of q.split(/\s+/)) query = query.ilike('title', `%${w}%`);
+  return query;
 }
 
-const sinceDate = () => new Date(Date.now() - MAX_AGE_DAYS * 86400000).toISOString();
 function findItems(data) {
   let best = [];
   for (const v of Object.values(data || {})) {
     if (Array.isArray(v) && v.length > best.length && v[0] && typeof v[0] === 'object'
-        && ('title' in v[0] || 'name' in v[0])) best = v;
+        && 'name' in v[0]) best = v;
   }
   return best;
 }
@@ -80,33 +76,28 @@ async function geckoSearch(keyword) {
   return findItems(json.data);
 }
 
+// Campos da GeckoAPI: url, sku, name, price, asin, thumbnail, aggregateRating...
 function mapAmazon(item) {
-  const link = pick(item, 'url', 'link', 'product_url', 'productUrl');
-  const url = link ? new URL(link, 'https://www.amazon.com.br').href : '';
-  const asin = pick(item, 'asin', 'ASIN') || url.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/)?.[1];
-  const title = pick(item, 'title', 'name');
-  const price = parsePrice(pick(item, 'price.value', 'price.current', 'price', 'current_price', 'currentPrice'));
-  if (!asin || !title || !(price > 0)) return null;
-  const original = parsePrice(pick(item, 'price.original', 'original_price', 'originalPrice',
-    'list_price', 'listPrice', 'old_price'));
+  const price = parsePrice(item.price);
+  if (!item.asin || !item.name || !(price > 0)) return null;
   return {
-    id: asin,
-    title: String(title).slice(0, 300),
+    id: item.asin,
+    title: String(item.name).slice(0, 300),
     price,
-    original_price: original > price ? original : null,
-    url: `https://www.amazon.com.br/dp/${asin}`,
-    image: pick(item, 'image', 'thumbnail', 'image_url', 'imageUrl', 'images.0') || null,
+    url: `https://www.amazon.com.br/dp/${item.asin}`,
+    image: item.thumbnail || null,
     store: 'Amazon'
   };
 }
+
 async function saveProducts(rows, category) {
   const now = new Date().toISOString();
   const { error } = await supabase.from('products')
     .upsert(rows.map(r => ({ ...r, category, updated_at: now })));
   if (error) throw new Error('Supabase products: ' + error.message);
   const { error: e2 } = await supabase.from('prices')
-    .upsert(rows.map(r => ({ product_id: r.id, price: r.price })),
-      { onConflict: 'product_id,day', ignoreDuplicates: true });
+    .upsert(rows.map(r => ({ product_id: r.id, price: r.price, day: brDate() })),
+      { onConflict: 'product_id,day' });
   if (e2) throw new Error('Supabase prices: ' + e2.message);
 }
 
@@ -114,13 +105,13 @@ app.post('/api/refresh', async (req, res) => {
   if (!process.env.REFRESH_KEY || req.get('x-refresh-key') !== process.env.REFRESH_KEY) {
     return res.status(401).json({ error: 'não autorizado' });
   }
-  const day = Math.floor(Date.now() / 86400000);
+  const day = Math.floor(Date.parse(brDate()) / 86400000);
   const today = [0, 1, 2].map(i => QUERIES[(day * 3 + i) % QUERIES.length]);
 
   const report = await Promise.all(today.map(async ([category, keyword]) => {
     try {
       const items = await geckoSearch(keyword);
-      const mapped = items.map(i => { try { return mapAmazon(i); } catch { return null; } }).filter(Boolean);
+      const mapped = items.map(mapAmazon).filter(Boolean);
       const rows = [...new Map(mapped.map(r => [r.id, r])).values()];
       if (rows.length) await saveProducts(rows, category);
       return { keyword, recebidos: items.length, salvos: rows.length,
@@ -131,7 +122,8 @@ app.post('/api/refresh', async (req, res) => {
   }));
 
   console.log(JSON.stringify(report));
-  res.json(report);
+  // Tudo falhou (ex.: créditos da GeckoAPI acabaram): o job do GitHub fica vermelho
+  res.status(report.every(r => r.erro) ? 502 : 200).json(report);
 });
 function toFront(r) {
   return {
@@ -165,7 +157,7 @@ app.post('/api/search', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'Termo inválido' });
   try {
     let query = supabase.from('products').select('*').gte('updated_at', sinceDate());
-    query = CATEGORY_KEYS.has(q) ? query.eq('category', q) : query.ilike('title', `%${q}%`);
+    query = CATEGORY_KEYS.has(q) ? query.eq('category', q) : matchWords(query, q);
     const { data, error } = await query.order('updated_at', { ascending: false }).limit(48);
     if (error) throw error;
     res.json({ results: data.map(toFront) });
@@ -179,8 +171,8 @@ app.post('/api/suggest', async (req, res) => {
   const q = cleanQuery(req.body.query);
   if (q.length < 2) return res.json({ suggestions: [] });
   try {
-    const { data } = await supabase.from('products').select('title')
-      .ilike('title', `%${q}%`).gte('updated_at', sinceDate()).limit(5);
+    const base = supabase.from('products').select('title').gte('updated_at', sinceDate());
+    const { data } = await matchWords(base, q).limit(5);
     res.json({ suggestions: [...new Set((data || []).map(r => r.title))] });
   } catch {
     res.json({ suggestions: [] });

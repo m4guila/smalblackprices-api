@@ -12,6 +12,6 @@ jobs:
     steps:
       - name: Atualizar produtos
         run: |
-          curl -sS -X POST https://smalblackprices-api.onrender.com/api/refresh \
+          curl -sS --fail-with-body -X POST https://smalblackprices-api.onrender.com/api/refresh \
             -H "x-refresh-key: ${{ secrets.REFRESH_KEY }}" \
             --max-time 300
