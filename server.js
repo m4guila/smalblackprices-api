@@ -76,13 +76,23 @@ async function geckoSearch(keyword) {
   return findItems(json.data);
 }
 
+// A GeckoAPI manda títulos com códigos HTML: "D&#x27;Água" -> "D'Água"
+const ENTITIES = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
+function decodeHtml(s) {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] !== '#') return ENTITIES[e.toLowerCase()] ?? m;
+    const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+    return String.fromCodePoint(code);
+  });
+}
+
 // Campos da GeckoAPI: url, sku, name, price, asin, thumbnail, aggregateRating...
 function mapAmazon(item) {
   const price = parsePrice(item.price);
   if (!item.asin || !item.name || !(price > 0)) return null;
   return {
     id: item.asin,
-    title: String(item.name).slice(0, 300),
+    title: decodeHtml(String(item.name)).slice(0, 300),
     price,
     url: `https://www.amazon.com.br/dp/${item.asin}`,
     image: item.thumbnail || null,
