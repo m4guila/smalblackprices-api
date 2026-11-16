@@ -2,7 +2,7 @@ name: Atualizar produtos
 
 on:
   schedule:
-    - cron: "0 11 * * *"   # 08:00 em Brasília
+    - cron: "17 10 * * *"   # 07:17 em Brasília. O GitHub atrasa até ~1h; fora da hora cheia atrasa menos
   workflow_dispatch:
 
 jobs:
