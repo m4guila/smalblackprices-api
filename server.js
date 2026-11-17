@@ -140,6 +140,7 @@ app.post('/api/refresh', async (req, res) => {
   }));
 
   console.log(JSON.stringify(report));
+  catalogCache.at = 0;
   // Tudo falhou (ex.: créditos da GeckoAPI acabaram): o job do GitHub fica vermelho
   res.status(report.every(r => r.erro) ? 502 : 200).json(report);
 });
@@ -157,6 +158,42 @@ function toFront(r) {
     checkedAt: r.updated_at
   };
 }
+
+// Health check: o cron-job.org chama a cada 10 min para o Render grátis não dormir.
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+// Catálogo inteiro para o site buscar no navegador (rápido, sem uma chamada por letra).
+// Produtos monitorados (Amazon, com histórico) + ofertas que o bot postou no canal (3 lojas).
+let catalogCache = { at: 0, data: null };
+app.get('/api/catalog', async (req, res) => {
+  try {
+    if (!catalogCache.data || Date.now() - catalogCache.at > 5 * 60 * 1000) {
+      const [prod, chan] = await Promise.all([
+        supabase.from('products').select('*').gte('updated_at', sinceDate())
+          .order('updated_at', { ascending: false }).limit(1000),
+        supabase.from('channel_offers').select('*')
+          .gte('posted_at', new Date(Date.now() - 7 * 86400000).toISOString())
+          .order('posted_at', { ascending: false }).limit(200)
+      ]);
+      if (prod.error) throw prod.error;
+      if (chan.error) console.error('channel_offers:', chan.error.message);
+      catalogCache = { at: Date.now(), data: {
+        products: prod.data.map(r => ({ ...toFront(r), category: r.category })),
+        channel: (chan.data || []).map(r => ({
+          id: 'c' + r.id, title: r.title, price: Number(r.price),
+          originalPrice: r.original_price ? Number(r.original_price) : null,
+          url: r.url, image: r.image, store: r.store, checkedAt: r.posted_at, fromChannel: true
+        })),
+        generatedAt: new Date().toISOString()
+      } };
+    }
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(catalogCache.data);
+  } catch (e) {
+    console.error(e.message);
+    res.status(500).json({ error: 'Falha ao ler catálogo' });
+  }
+});
 
 app.post('/api/trending', async (req, res) => {
   try {
