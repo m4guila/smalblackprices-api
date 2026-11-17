@@ -1,8 +1,7 @@
 name: Atualizar produtos
 
 on:
-  schedule:
-    - cron: "17 10 * * *"   # 07:17 em Brasília. O GitHub atrasa até ~1h; fora da hora cheia atrasa menos
+  # Disparado pelo cron-job.org às 07:17 (Brasília); o agendamento do GitHub atrasava ou pulava.
   workflow_dispatch:
 
 jobs:
