@@ -47,6 +47,14 @@ function matchWords(query, q) {
   return query;
 }
 
+// Busca tolerante a erro de digitação ("ipone" -> "iphone"), pela função
+// search_products_fuzzy do Supabase (pg_trgm). Se ela não existir, devolve vazio.
+async function fuzzySearch(q, limit) {
+  const { data, error } = await supabase.rpc('search_products_fuzzy', { q, since: sinceDate(), max_rows: limit });
+  if (error) { console.error('fuzzy:', error.message); return []; }
+  return data || [];
+}
+
 function findItems(data) {
   let best = [];
   for (const v of Object.values(data || {})) {
@@ -170,7 +178,8 @@ app.post('/api/search', async (req, res) => {
     query = CATEGORY_KEYS.has(q) ? query.eq('category', q) : matchWords(query, q);
     const { data, error } = await query.order('updated_at', { ascending: false }).limit(48);
     if (error) throw error;
-    res.json({ results: data.map(toFront) });
+    const rows = data.length || CATEGORY_KEYS.has(q) ? data : await fuzzySearch(q, 48);
+    res.json({ results: rows.map(toFront) });
   } catch (e) {
     console.error(e.message);
     res.status(500).json({ error: 'Falha na busca' });
@@ -182,7 +191,8 @@ app.post('/api/suggest', async (req, res) => {
   if (q.length < 2) return res.json({ suggestions: [] });
   try {
     const base = supabase.from('products').select('title').gte('updated_at', sinceDate());
-    const { data } = await matchWords(base, q).limit(5);
+    let { data } = await matchWords(base, q).limit(5);
+    if (!data || !data.length) data = await fuzzySearch(q, 5);
     res.json({ suggestions: [...new Set((data || []).map(r => r.title))] });
   } catch {
     res.json({ suggestions: [] });
