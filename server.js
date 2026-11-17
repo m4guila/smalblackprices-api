@@ -13,17 +13,22 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 
 const MAX_AGE_DAYS = 6;
 
-// [categoria do site, termo buscado na Amazon] - 3 por dia, em rodízio de 3 dias
+// [categoria do site, termo buscado na Amazon] - 3 por dia, em rodízio de 4 dias
+// (12 termos = 90 créditos/mês da GeckoAPI; cada termo volta a cada 4 dias, dentro de
+// MAX_AGE_DAYS). Ordem pensada para o rodízio: 18/11 TV/iPhone/air fryer, 19/11 geladeira...
 const QUERIES = [
-  ['trending', 'smart tv 4k'],
-  ['trending', 'iphone'],
-  ['trending', 'air fryer'],
+  ['eletrodomestico', 'geladeira frost free'],
+  ['eletronico', 'celular samsung galaxy'],
+  ['eletronico', 'notebook'],
   ['eletronico', 'fone bluetooth'],
   ['beleza', 'perfume'],
-  ['eletrodomestico', 'eletrodomesticos'],
+  ['eletrodomestico', 'maquina de lavar'],
   ['casa cozinha', 'utensilios de cozinha'],
   ['video game', 'console video game'],
-  ['brinquedo', 'brinquedos']
+  ['brinquedo', 'brinquedos'],
+  ['trending', 'smart tv 4k'],
+  ['trending', 'iphone'],
+  ['trending', 'air fryer']
 ];
 const CATEGORY_KEYS = new Set(QUERIES.map(q => q[0]));
 
@@ -144,6 +149,38 @@ app.post('/api/refresh', async (req, res) => {
   // Tudo falhou (ex.: créditos da GeckoAPI acabaram): o job do GitHub fica vermelho
   res.status(report.every(r => r.erro) ? 502 : 200).json(report);
 });
+// Ordem do site = mesma régua do bot: menor preço já visto > abaixo do típico > resto
+// > acima do típico; dentro de cada grupo, o maior desconto primeiro.
+async function priceHistory(ids) {
+  const since = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+  const byId = new Map();
+  for (let from = 0; ; from += 1000) { // o Supabase entrega no máximo 1000 linhas por vez
+    const { data, error } = await supabase.from('prices').select('product_id,price')
+      .gte('day', since).order('product_id').order('day').range(from, from + 999);
+    if (error) throw error;
+    for (const row of data) {
+      if (!ids.has(row.product_id)) continue;
+      if (!byId.has(row.product_id)) byId.set(row.product_id, []);
+      byId.get(row.product_id).push(Number(row.price));
+    }
+    if (data.length < 1000 || from > 20000) break;
+  }
+  return byId;
+}
+
+function dealScore(p, prices) {
+  const fromOriginal = p.originalPrice > p.price ? 1 - p.price / p.originalPrice : 0;
+  if (!prices || prices.length < 2 || !(p.price > 0)) return [2, fromOriginal];
+  const sorted = [...prices].sort((a, b) => a - b);
+  const min = sorted[0];
+  const typical = sorted[Math.floor(sorted.length / 2)];
+  if (sorted[sorted.length - 1] - min < min * 0.01) return [2, fromOriginal]; // preço parado
+  const save = Math.max(fromOriginal, 1 - p.price / typical);
+  if (p.price <= min * 1.01) return [0, save];
+  if (p.price < typical) return [1, save];
+  return [3, 0];
+}
+
 function toFront(r) {
   return {
     id: r.id,
@@ -177,8 +214,14 @@ app.get('/api/catalog', async (req, res) => {
       ]);
       if (prod.error) throw prod.error;
       if (chan.error) console.error('channel_offers:', chan.error.message);
+      const products = prod.data.map(r => ({ ...toFront(r), category: r.category }));
+      let hist = new Map();
+      try { hist = await priceHistory(new Set(products.map(p => p.id))); }
+      catch (e) { console.error('prices:', e.message); } // sem histórico: ordena só pelo desconto
+      const score = new Map(products.map(p => [p.id, dealScore(p, hist.get(p.id))]));
+      products.sort((a, b) => score.get(a.id)[0] - score.get(b.id)[0] || score.get(b.id)[1] - score.get(a.id)[1]);
       catalogCache = { at: Date.now(), data: {
-        products: prod.data.map(r => ({ ...toFront(r), category: r.category })),
+        products,
         channel: (chan.data || []).map(r => ({
           id: 'c' + r.id, title: r.title, price: Number(r.price),
           originalPrice: r.original_price ? Number(r.original_price) : null,
